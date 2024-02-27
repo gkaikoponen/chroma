@@ -570,7 +570,7 @@ type styleCacheEntry struct {
 }
 
 type styleCache struct {
-	mu sync.Mutex
+	mu sync.RWMutex
 	// LRU cache of compiled (and possibly compressed) styles. This is a slice
 	// because the cache size is small, and a slice is sufficiently fast for
 	// small N.
@@ -583,24 +583,34 @@ func newStyleCache(f *Formatter) *styleCache {
 }
 
 func (l *styleCache) get(style *chroma.Style) map[chroma.TokenType]string {
+	// Try to grab the most recent cache entry using only a read lock
+	readResult := func() { // Local function ensures read lock always releases
+		l.mu.RLock()
+		defer l.mu.RUnlock()
+		if len(l.cache) > 0 && l.cache[len(l.cache)-1].style == style {
+			return l.cache[len(l.cache)-1].cache // Never nil
+		}
+		return nil
+	}
+	if readResult != nil {
+		return readResult
+	}
+
+	// Otherwise, grab the write lock and search older cache entries
 	l.mu.Lock()
 	defer l.mu.Unlock()
-
+	
 	// Look for an existing entry.
-	for i := len(l.cache) - 1; i >= 0; i-- {
+	for i := len(l.cache) - 2; i >= 0; i-- {  // Skip newest which was checked above.
 		entry := l.cache[i]
 		if entry.style == style {
-			// Top of the cache, no need to adjust the order.
-			if i == len(l.cache)-1 {
-				return entry.cache
-			}
 			// Move this entry to the end of the LRU
 			copy(l.cache[i:], l.cache[i+1:])
 			l.cache[len(l.cache)-1] = entry
 			return entry.cache
 		}
 	}
-
+	
 	// No entry, create one.
 	cached := l.f.styleToCSS(style)
 	if !l.f.Classes {
